@@ -61,6 +61,7 @@ class FusionConfig:
     conversation_after_s: float = 10.0
     conversation_end_s: float = 60.0
     speech_presence_ratio: float = 0.1
+    speech_only_max_s: float = 120.0
     count_window_s: float = 3.0
 
 
@@ -117,17 +118,42 @@ class RoomConfig:
     outputs: OutputsConfig = field(default_factory=OutputsConfig)
 
 
+def _typed(value: Any, default: Any, where: str) -> Any:
+    """Check a value against the type of its default, so `vacant_after_s: "60"` fails at load time."""
+    if isinstance(default, bool):
+        if not isinstance(value, bool):
+            raise ConfigError(f"'{where}' must be true or false")
+    elif isinstance(default, int):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ConfigError(f"'{where}' must be a whole number")
+    elif isinstance(default, float):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ConfigError(f"'{where}' must be a number")
+        return float(value)
+    elif isinstance(default, str):
+        if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+            raise ConfigError(f"'{where}' must be text")
+        return str(value)  # a numeric password or host typed without quotes
+    elif isinstance(default, dict) and not isinstance(value, dict):
+        raise ConfigError(f"'{where}' must be a mapping")
+    return value
+
+
+def _check_keys(raw: dict, known: set[str], where: str) -> None:
+    unknown = set(raw) - known
+    if unknown:
+        raise ConfigError(f"unknown key(s) in '{where}': {', '.join(sorted(unknown))}")
+
+
 def _section(cls, raw: Any, where: str):
-    """Build a dataclass from a dict, rejecting unknown keys so typos don't pass silently."""
+    """Build a dataclass from a dict. Unknown keys and wrong types fail loudly, so typos don't pass silently."""
     if raw is None:
         return cls()
     if not isinstance(raw, dict):
         raise ConfigError(f"'{where}' must be a mapping")
-    known = set(cls.__dataclass_fields__)
-    unknown = set(raw) - known
-    if unknown:
-        raise ConfigError(f"unknown key(s) in '{where}': {', '.join(sorted(unknown))}")
-    return cls(**raw)
+    _check_keys(raw, set(cls.__dataclass_fields__), where)
+    defaults = cls()
+    return cls(**{k: _typed(v, getattr(defaults, k), f"{where}.{k}") for k, v in raw.items()})
 
 
 def _points(raw: Any, where: str, min_len: int) -> list[tuple[float, float]]:
@@ -153,6 +179,9 @@ def _as_value(v: Any) -> str:
 def parse_config(raw: dict[str, Any]) -> RoomConfig:
     if not isinstance(raw, dict):
         raise ConfigError("config must be a mapping")
+    _check_keys(
+        raw, {"room_id", "zones", "camera", "detector", "tracker", "audio", "fusion", "policy", "outputs"}, "top level"
+    )
     room_id = raw.get("room_id")
     if not room_id:
         raise ConfigError("'room_id' is required")
@@ -164,6 +193,7 @@ def parse_config(raw: dict[str, Any]) -> RoomConfig:
     for i, z in enumerate(zones_raw):
         if not isinstance(z, dict) or "name" not in z:
             raise ConfigError(f"zone #{i + 1} needs a 'name'")
+        _check_keys(z, {"name", "polygon"}, f"zones.{z['name']}")
         zones.append(Zone(str(z["name"]), _points(z.get("polygon"), f"zones.{z['name']}.polygon", 3)))
     names = [z.name for z in zones]
     if len(set(names)) != len(names):
@@ -172,6 +202,7 @@ def parse_config(raw: dict[str, Any]) -> RoomConfig:
     cam_raw = raw.get("camera") or {}
     camera = CameraConfig()
     if cam_raw:
+        _check_keys(cam_raw, {"image_points", "floor_points"}, "camera")
         img = _points(cam_raw.get("image_points"), "camera.image_points", 4)
         flr = _points(cam_raw.get("floor_points"), "camera.floor_points", 4)
         if len(img) != len(flr):
@@ -185,6 +216,7 @@ def parse_config(raw: dict[str, Any]) -> RoomConfig:
         raise ConfigError("detector.frame_stride must be at least 1")
 
     policy_raw = raw.get("policy") or {}
+    _check_keys(policy_raw, {"min_hold_s", "actions"}, "policy")
     actions_raw = policy_raw.get("actions") or {}
     unknown_states = set(actions_raw) - set(STATES)
     if unknown_states:
@@ -193,12 +225,16 @@ def parse_config(raw: dict[str, Any]) -> RoomConfig:
         state: {str(target): _as_value(value) for target, value in (targets or {}).items()}
         for state, targets in actions_raw.items()
     }
-    policy = PolicyConfig(float(policy_raw.get("min_hold_s", 30.0)), actions)
+    policy = PolicyConfig(_typed(policy_raw.get("min_hold_s", 30.0), 30.0, "policy.min_hold_s"), actions)
 
     out_raw = raw.get("outputs") or {}
+    _check_keys(out_raw, {"console", "jsonl_path", "mqtt", "qrc", "api"}, "outputs")
+    jsonl_path = out_raw.get("jsonl_path")
+    if jsonl_path is not None and not isinstance(jsonl_path, str):
+        raise ConfigError("'outputs.jsonl_path' must be a file path")
     outputs = OutputsConfig(
-        console=bool(out_raw.get("console", True)),
-        jsonl_path=out_raw.get("jsonl_path"),
+        console=_typed(out_raw.get("console", True), True, "outputs.console"),
+        jsonl_path=jsonl_path,
         mqtt=_section(MqttConfig, out_raw.get("mqtt"), "outputs.mqtt"),
         qrc=_section(QrcConfig, out_raw.get("qrc"), "outputs.qrc"),
         api=_section(ApiConfig, out_raw.get("api"), "outputs.api"),

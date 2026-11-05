@@ -9,8 +9,9 @@ SR = 16000
 
 
 def test_homography_maps_calibration_points_both_ways():
-    cam = CameraConfig(image_points=[(100, 500), (700, 500), (600, 200), (200, 200)],
-                       floor_points=[(0, 0), (4, 0), (4, 6), (0, 6)])
+    cam = CameraConfig(
+        image_points=[(100, 500), (700, 500), (600, 200), (200, 200)], floor_points=[(0, 0), (4, 0), (4, 6), (0, 6)]
+    )
     m = FloorMapper(cam)
     floor = m.to_floor(cam.image_points)
     assert floor == pytest.approx(np.array(cam.floor_points), abs=1e-6)
@@ -43,8 +44,11 @@ def _speech_like(seconds: float, rng: np.random.Generator, level: float = 0.1) -
     voice = np.zeros_like(t)
     for k in range(1, 25):
         f = k * 140.0
-        formants = (3 * np.exp(-(((f - 600) / 150) ** 2)) + 2 * np.exp(-(((f - 1400) / 250) ** 2))
-                    + np.exp(-(((f - 2500) / 300) ** 2)))
+        formants = (
+            3 * np.exp(-(((f - 600) / 150) ** 2))
+            + 2 * np.exp(-(((f - 1400) / 250) ** 2))
+            + np.exp(-(((f - 2500) / 300) ** 2))
+        )
         voice += (1.0 / k) * (0.3 + formants) * np.sin(k * phase)
     syllables = np.clip(np.sin(2 * np.pi * 4 * t), 0, None) ** 2
     phrases = (np.sin(2 * np.pi * 0.25 * t) > -0.3).astype(float)  # talk ~60% of the time, then pause
@@ -73,7 +77,7 @@ def test_silence_and_clicks_are_not_speech():
     rng = np.random.default_rng(3)
     x = rng.normal(0, 0.001, 20 * SR).astype(np.float32)
     for start in range(SR, 20 * SR, 2 * SR):  # a door click or keyboard clack every 2 s
-        x[start:start + 200] += rng.normal(0, 0.3, 200).astype(np.float32)
+        x[start : start + 200] += rng.normal(0, 0.3, 200).astype(np.float32)
     assert _ratio(x) < 0.08
 
 

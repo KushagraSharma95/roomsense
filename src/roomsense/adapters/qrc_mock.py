@@ -22,8 +22,13 @@ class MockCore:
         class Handler(socketserver.BaseRequestHandler):
             def handle(self) -> None:
                 logged_on = not core.user
-                self._push({"jsonrpc": "2.0", "method": "EngineStatus",
-                            "params": {"State": "Active", "DesignName": "roomsense-mock", "IsEmulator": True}})
+                self._push(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "EngineStatus",
+                        "params": {"State": "Active", "DesignName": "roomsense-mock", "IsEmulator": True},
+                    }
+                )
                 buf = b""
                 while True:
                     chunk = self.request.recv(65536)
@@ -75,8 +80,15 @@ class MockCore:
         if not logged_on:
             return logged_on, err(10, "Logon required")
         if method == "StatusGet":
-            return logged_on, ok({"Platform": "mock", "State": "Active", "DesignName": "roomsense-mock",
-                                  "IsEmulator": True, "Status": {"Code": 0, "String": "OK"}})
+            return logged_on, ok(
+                {
+                    "Platform": "mock",
+                    "State": "Active",
+                    "DesignName": "roomsense-mock",
+                    "IsEmulator": True,
+                    "Status": {"Code": 0, "String": "OK"},
+                }
+            )
         if method == "Control.Set":
             self.controls[params["Name"]] = params["Value"]
             return logged_on, ok()
@@ -95,6 +107,7 @@ class MockCore:
             if comp is None:
                 return logged_on, err(7, f"Unknown component name: {params['Name']}")
             names = [c["Name"] for c in params.get("Controls", [])]
-            return logged_on, ok({"Name": params["Name"],
-                                  "Controls": [{"Name": n, "Value": comp.get(n)} for n in names]})
+            return logged_on, ok(
+                {"Name": params["Name"], "Controls": [{"Name": n, "Value": comp.get(n)} for n in names]}
+            )
         return logged_on, err(-32601, "Method not found")

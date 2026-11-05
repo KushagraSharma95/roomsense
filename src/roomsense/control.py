@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .fusion import StateChange
+from .fusion import Evidence, RoomState, StateChange
 
 
 @dataclass(frozen=True)
@@ -46,8 +46,9 @@ class ControlPolicy:
     """Maps each room state to device settings.
 
     A device is only commanded when its setting actually changes, and never twice within
-    `min_hold_s`. A change that arrives too soon is held and sent once the hold expires, unless
-    the room has moved on again by then (then the newer setting wins).
+    `min_hold_s`. A change that arrives too soon is held and sent once the hold expires. If the room
+    changes state again before then, the held change is dropped: the newer state's setting wins, and
+    a device the newer state doesn't mention is left as it is.
     """
 
     def __init__(self, room_id: str, actions: dict[str, dict[str, str]], min_hold_s: float = 30.0) -> None:
@@ -59,15 +60,29 @@ class ControlPolicy:
         self.pending: dict[str, Decision] = {}
 
     def on_state_change(self, change: StateChange) -> list[Decision]:
+        wanted = self.actions.get(change.new.value, {})
+        for target in list(self.pending):
+            if target not in wanted:
+                del self.pending[target]
+        return self._apply(change.t, change.new, wanted, change.reason, change.evidence)
+
+    def sync(self, t: float, state: RoomState, reason: str, evidence: Evidence | None = None) -> list[Decision]:
+        """Command every device to the setting for `state`, e.g. at start-up, when the devices' real
+        settings are unknown (lights may have been left on before a restart)."""
+        return self._apply(t, state, self.actions.get(state.value, {}), reason, evidence)
+
+    def _apply(
+        self, t: float, state: RoomState, wanted: dict[str, str], reason: str, evidence: Evidence | None
+    ) -> list[Decision]:
         out = []
-        for target, value in self.actions.get(change.new.value, {}).items():
-            d = Decision(change.t, self.room_id, Action(target, value), change.new.value, change.reason,
-                         change.evidence.as_dict())
+        ev = evidence.as_dict() if evidence else {}
+        for target, value in wanted.items():
+            d = Decision(t, self.room_id, Action(target, value), state.value, reason, ev)
             if self.current.get(target) == value:
                 self.pending.pop(target, None)  # already there; drop any queued change
                 continue
             last = self.last_sent.get(target)
-            if last is not None and change.t - last < self.min_hold_s:
+            if last is not None and t - last < self.min_hold_s:
                 self.pending[target] = d
                 continue
             self.pending.pop(target, None)

@@ -161,8 +161,11 @@ class MicFeed:
     def _on_audio(self, indata, frames, time_info, status) -> None:  # noqa: ARG002 (sounddevice signature)
         with self._lock:
             flags = self.detector.process(indata[:, 0].copy())
-        self.activity.add(self.clock() - frames / self.detector.sample_rate, flags,
-                          self.detector.frame_len / self.detector.sample_rate)
+        self.activity.add(
+            self.clock() - frames / self.detector.sample_rate,
+            flags,
+            self.detector.frame_len / self.detector.sample_rate,
+        )
 
     def start(self) -> None:
         self.stream.start()

@@ -59,7 +59,10 @@ def cmd_simulate(args: argparse.Namespace) -> int:
         cfg.outputs.qrc.user = cfg.outputs.qrc.password = ""
         sinks.append(QrcSink(cfg.outputs.qrc))
         print(f"mock Q-SYS Core listening on {host}:{port}")
-    result = run_simulation(cfg, args.out, seed=args.seed, extra_sinks=sinks, plot=not args.no_plot)
+    result = run_simulation(cfg, args.out, seed=args.seed, extra_sinks=sinks, plot=not args.no_plot, days=args.days)
+    for s in sinks:
+        if hasattr(s, "flush"):
+            s.flush()
     print()
     print(format_table(result["metrics"]))
     print(f"\ndecision log: {Path(args.out) / 'decisions.jsonl'}")
@@ -105,8 +108,11 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     cfg = load_config(args.config)
     d = cfg.detector
-    detector = (YoloxDetector(d.model_path, d.score_threshold, d.nms_threshold, d.threads)
-                if d.kind == "yolox" else MotionDetector())
+    detector = (
+        YoloxDetector(d.model_path, d.score_threshold, d.nms_threshold, d.threads)
+        if d.kind == "yolox"
+        else MotionDetector()
+    )
 
     shared = None
     if args.api or cfg.outputs.api.enabled:
@@ -116,7 +122,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         serve_in_background(shared, cfg.outputs.api.host, cfg.outputs.api.port)
         print(f"API on http://{cfg.outputs.api.host}:{cfg.outputs.api.port}  (/status, /decisions, /ws, /preview.jpg)")
 
-    use_audio = cfg.audio.enabled and args.audio != "none"
+    use_audio = args.audio != "none"  # --audio picks the source and overrides audio.enabled in the config
     cfg.audio.enabled = use_audio
     speech = SpeechActivity(cfg.audio.window_s) if use_audio else None
     pipeline = RoomPipeline(cfg, detector, build_sinks(cfg, shared), speech)
@@ -139,11 +145,15 @@ def cmd_run(args: argparse.Namespace) -> int:
         if args.audio == "mic":
             try:
                 mic = MicFeed(sd, speech, clock)
-            except (ImportError, OSError) as e:
-                print(f"microphone unavailable ({e}); install with: pip install 'roomsense[audio]'",
-                      file=sys.stderr)
+                mic.start()
+            except Exception as e:  # sounddevice raises PortAudioError (a plain Exception) for device problems
+                print(
+                    f"microphone unavailable: {e}\n"
+                    "  install support with: pip install 'roomsense[audio]'\n"
+                    "  list devices with:    python -m sounddevice",
+                    file=sys.stderr,
+                )
                 return 2
-            mic.start()
         else:
             wav = WavFeed(args.audio, sd, speech)
 
@@ -168,8 +178,9 @@ def cmd_run(args: argparse.Namespace) -> int:
                 if args.record:
                     if writer is None:
                         Path(args.record).parent.mkdir(parents=True, exist_ok=True)
-                        writer = cv2.VideoWriter(args.record, cv2.VideoWriter_fourcc(*"mp4v"), fps,
-                                                 (vis.shape[1], vis.shape[0]))
+                        writer = cv2.VideoWriter(
+                            args.record, cv2.VideoWriter_fourcc(*"mp4v"), fps, (vis.shape[1], vis.shape[0])
+                        )
                     writer.write(vis)
                 if show:
                     try:
@@ -177,8 +188,11 @@ def cmd_run(args: argparse.Namespace) -> int:
                         if cv2.waitKey(1) & 0xFF == ord("q"):
                             break
                     except cv2.error:
-                        print("no display support in this OpenCV build; use --api and open /preview.jpg, "
-                              "or install opencv-python instead of opencv-python-headless", file=sys.stderr)
+                        print(
+                            "no display support in this OpenCV build; use --api and open /preview.jpg, "
+                            "or install opencv-python instead of opencv-python-headless",
+                            file=sys.stderr,
+                        )
                         show = False
             if args.max_seconds and t >= args.max_seconds:
                 break
@@ -194,8 +208,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             mic.stop()
         pipeline.close()
     ev = pipeline.estimator.last_evidence
-    print(f"processed {frame_idx} frames; final state {pipeline.estimator.state.value}, "
-          f"people {ev.people if ev else 0}")
+    print(
+        f"processed {frame_idx} frames; final state {pipeline.estimator.state.value}, people {ev.people if ev else 0}"
+    )
     return 0
 
 
@@ -218,7 +233,8 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("simulate", help="run a synthetic 4-hour day and compare against a motion sensor")
     p.add_argument("--config", default=DEFAULT_CONFIG)
     p.add_argument("--out", default="out/sim")
-    p.add_argument("--seed", type=int, default=7)
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--days", type=int, default=1, help="average over this many simulated days (default 1)")
     p.add_argument("--no-plot", action="store_true")
     p.add_argument("--json", action="store_true", help="also write metrics.json")
     p.add_argument("--qrc-mock", action="store_true", help="send decisions to a local mock Q-SYS Core")
@@ -234,7 +250,9 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("models", help="download detector weights")
     msub = p.add_subparsers(dest="models_cmd", required=True)
     pd = msub.add_parser("download")
-    pd.add_argument("names", nargs="*", default=["nano"], help="nano and/or tiny (default: nano)")
+    pd.add_argument(
+        "names", nargs="*", default=["nano"], choices=["nano", "tiny"], help="nano and/or tiny (default: nano)"
+    )
     pd.add_argument("--dir", default="models")
     pd.set_defaults(func=cmd_models)
 

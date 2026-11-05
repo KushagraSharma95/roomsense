@@ -6,9 +6,22 @@ ways of deciding whether a room is occupied:
   3. camera + microphone: the full pipeline
 
 Everything is generated: positions, detector misses and false alarms, speech, motion. The day
-deliberately contains the two situations that break single-sensor systems (someone reading very
-still, and a presentation with the lights down so the camera can't see). The numbers show the logic
-behaves as designed under these assumptions. They are not field measurements.
+deliberately contains the situations that break each approach:
+
+- someone reading very still (hard for a motion sensor),
+- a presentation with the blinds down and the lights dimmed, so the camera can't see (hard for a
+  camera alone),
+- voices in the corridor right after a meeting ends (hard for anything that trusts the microphone).
+
+Assumptions worth knowing:
+- The room has windows, so the camera can see whenever the blinds are up, even after the system
+  has switched the lights off. In a windowless room at night, a quiet person walking into a dark
+  room would not be seen until a light came on; an IR camera or a door sensor would be needed.
+- Each sensor draws from its own random stream, so changing one part of the day doesn't reshuffle
+  the noise of the others.
+
+The numbers show the logic behaves as designed under these assumptions. They are not field
+measurements.
 """
 
 from __future__ import annotations
@@ -61,7 +74,8 @@ DEFAULT_DAY = [
     Segment(7, 150.5, 200, (1.0, 5.0), "quiet"),
     Segment(8, 205.0, 230, (3.0, 5.0), "phone", talk=0.5),
 ]
-DEFAULT_DARK = [(110.0, 132.0)]  # minutes with the lights down for a presentation
+DEFAULT_DARK = [(110.0, 132.0)]  # minutes with blinds down and lights dimmed for a presentation
+DEFAULT_CORRIDOR = [(140.0, 152.0, 0.3)]  # (start, end, share of audio frames with voices heard through the door)
 ENTRANCE = (0.6, 0.4)
 WALK_S = 6.0
 
@@ -93,6 +107,7 @@ def simulate(
     cfg: RoomConfig,
     day: list[Segment] | None = None,
     dark: list[tuple[float, float]] | None = None,
+    corridor: list[tuple[float, float, float]] | None = None,
     minutes: float = 240,
     dt: float = 0.5,
     seed: int = 7,
@@ -100,7 +115,11 @@ def simulate(
 ) -> dict:
     day = DEFAULT_DAY if day is None else day
     dark = DEFAULT_DARK if dark is None else dark
-    rng = np.random.default_rng(seed)
+    corridor = DEFAULT_CORRIDOR if corridor is None else corridor
+    # one independent random stream per source of noise
+    rng_pos, rng_det, rng_talk, rng_audio, rng_motion = (
+        np.random.default_rng(s) for s in np.random.SeedSequence(seed).spawn(5)
+    )
     cfg = copy.deepcopy(cfg)
     cfg.audio.enabled = True
 
@@ -125,27 +144,33 @@ def simulate(
 
         detections, talking, motion, in_meeting = [], False, False, 0
         for seg in present:
-            (x, y), activity = _position(seg, t, rng)
+            (x, y), activity = _position(seg, t, rng_pos)
             p_motion, p_miss = ACTIVITY[activity]
-            motion |= rng.random() < min(1.0, p_motion * dt)
+            motion |= rng_motion.random() < min(1.0, p_motion * dt)
             if activity == "meeting":
                 in_meeting += 1
-            if activity != "walking" and rng.random() < seg.talk:
+            if activity != "walking" and rng_talk.random() < seg.talk:
                 talking = True
-            if not is_dark and rng.random() >= p_miss:
-                detections.append(Detection(_box_for(pipeline.mapper, x, y, rng), 0.8))
-        if not is_dark and rng.random() < 0.002:  # an occasional false alarm somewhere in the room
-            fx, fy = rng.uniform(min(xs), max(xs)), rng.uniform(min(ys), max(ys))
-            detections.append(Detection(_box_for(pipeline.mapper, fx, fy, rng), 0.4))
+            if not is_dark and rng_det.random() >= p_miss:
+                detections.append(Detection(_box_for(pipeline.mapper, x, y, rng_det), 0.8))
+        if not is_dark and rng_det.random() < 0.002:  # an occasional false alarm somewhere in the room
+            fx, fy = rng_det.uniform(min(xs), max(xs)), rng_det.uniform(min(ys), max(ys))
+            detections.append(Detection(_box_for(pipeline.mapper, fx, fy, rng_det), 0.4))
 
         # The speech detector works on 30 ms frames. Model it per frame: while someone talks, about 70% of
         # frames are voiced and caught; otherwise 2% of frames are false alarms (fans, doors, keyboards).
+        # Voices outside the door are heard too, at the rate given in `corridor`.
+        p_voice = 0.7 if talking else 0.02
+        for a, b, share in corridor:
+            if a <= t_min < b:
+                p_voice = max(p_voice, share)
         n_frames = max(1, int(round(dt / 0.03)))
-        frames = rng.random(n_frames) < (0.7 if talking else 0.02)
+        frames = rng_audio.random(n_frames) < p_voice
         speech.add(t, frames.tolist(), dt / n_frames)
 
-        r = pipeline.process_detections(t, detections, vision_ok=not is_dark,
-                                        vision_note="too dark (simulated)" if is_dark else "ok")
+        r = pipeline.process_detections(
+            t, detections, vision_ok=not is_dark, vision_note="too dark (simulated)" if is_dark else "ok"
+        )
         zone_counts = {k: len(v) for k, v in r.zones.items() if k != "room"}
         camera_only.update(t, len(r.positions), zone_counts, None, not is_dark)
 
@@ -158,8 +183,14 @@ def simulate(
         states["camera + microphone"].append(r.state)
         states["camera only"].append(camera_only.state)
         states["motion sensor"].append(RoomState.OCCUPIED if pir_on else RoomState.VACANT)
-        for k, v in (("t", t), ("truth", len(present)), ("people", r.people),
-                     ("speech", r.speech_ratio or 0.0), ("meeting", in_meeting >= 2), ("dark", is_dark)):
+        for k, v in (
+            ("t", t),
+            ("truth", len(present)),
+            ("people", r.people),
+            ("speech", r.speech_ratio or 0.0),
+            ("meeting", in_meeting >= 2),
+            ("dark", is_dark),
+        ):
             rec[k][i] = v
 
     pipeline.close()
@@ -194,16 +225,63 @@ def score(rec: dict, states: dict[str, list[RoomState]], dt: float) -> dict:
     return out
 
 
+def simulate_days(cfg: RoomConfig, days: int = 20, seed: int = 0, sinks: list[Sink] | None = None) -> dict:
+    """Run `days` simulated days with different random seeds and average the scores. Sinks only see day 1."""
+    results = [simulate(cfg, seed=seed + k, sinks=sinks if k == 0 else None) for k in range(days)]
+    agg: dict = {"days": days, "systems": {}}
+    for name in SYSTEMS:
+        per_day = [r["metrics"]["systems"][name] for r in results]
+        agg["systems"][name] = {
+            key: {
+                "mean": round(float(np.mean([m[key] for m in per_day])), 3),
+                "min": float(np.min([m[key] for m in per_day])),
+                "max": float(np.max([m[key] for m in per_day])),
+            }
+            for key in per_day[0]
+        }
+    for key in ("people_count_mae", "people_count_exact"):
+        agg[key] = round(float(np.mean([r["metrics"][key] for r in results])), 3)
+    return {"metrics": agg, "first_day": results[0]}
+
+
 def format_table(metrics: dict) -> str:
-    rows = [("", "off on people", "dark while occupied", "on while empty", "changes", "meeting P/R")]
+    """Table for one day's metrics, or for the averages from simulate_days()."""
+    days = metrics.get("days", 1)
+
+    def val(m: dict, key: str, unit: str = "", rng: bool = False) -> str:
+        v = m[key]
+        if not isinstance(v, dict):
+            return f"{v}{unit}"
+        text = f"{round(v['mean'], 1):g}{unit}"
+        return f"{text} ({v['min']:g}-{v['max']:g})" if rng else text
+
+    header = "off on people" + (" per day (range)" if days > 1 else "")
+    rows = [("", header, "dark while occupied", "on while empty", "changes", "meeting P/R")]
     for name, m in metrics["systems"].items():
-        pr = f"{m['meeting_precision']:.2f}/{m['meeting_recall']:.2f}" if "meeting_recall" in m else "n/a"
-        rows.append((name, str(m["switched_off_on_people"]), f"{m['dark_while_occupied_min']} min",
-                     f"{m['on_while_empty_min']} min", str(m["state_changes"]), pr))
+        if "meeting_recall" in m:
+            p, r = m["meeting_precision"], m["meeting_recall"]
+            p, r = (p["mean"], r["mean"]) if isinstance(p, dict) else (p, r)
+            pr = f"{p:.2f}/{r:.2f}"
+        else:
+            pr = "n/a"
+        rows.append(
+            (
+                name,
+                val(m, "switched_off_on_people", rng=days > 1),
+                val(m, "dark_while_occupied_min", " min"),
+                val(m, "on_while_empty_min", " min"),
+                val(m, "state_changes"),
+                pr,
+            )
+        )
     widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
     lines = ["  ".join(c.ljust(w) for c, w in zip(r, widths, strict=True)) for r in rows]
-    lines.append(f"people count (camera, when it can see): mean abs error {metrics['people_count_mae']}, "
-                 f"exact {metrics['people_count_exact']:.0%} of the time")
+    if days > 1:
+        lines.insert(0, f"averages over {days} simulated days")
+    lines.append(
+        f"people count (camera, when it can see): mean abs error {metrics['people_count_mae']}, "
+        f"exact {metrics['people_count_exact']:.0%} of the time"
+    )
     return "\n".join(lines)
 
 
@@ -244,17 +322,30 @@ def plot_timeline(result: dict, path: str | Path) -> Path:
         for (a, b), on in _runs(bad):
             # outline switch-offs only; the few seconds it takes to confirm a new arrival are not marked
             if on and a > 0 and st[a - 1] != RoomState.VACANT:
-                ax.broken_barh([(t_min[a], (b - a) * dt / 60)], (row - 0.42, 0.84), facecolor="none",
-                               edgecolor="#c0392b", lw=1.2)
+                ax.broken_barh(
+                    [(t_min[a], (b - a) * dt / 60)], (row - 0.42, 0.84), facecolor="none", edgecolor="#c0392b", lw=1.2
+                )
     ax.set_yticks(range(len(SYSTEMS)), SYSTEMS)
     ax.set_xlabel("minutes")
     ax.set_xlim(0, t_min[-1])
     handles = [plt.Rectangle((0, 0), 1, 1, color=c) for c in colours.values()]
     handles.append(plt.Rectangle((0, 0), 1, 1, facecolor="none", edgecolor="#c0392b"))
-    ax.legend(handles, ["vacant", "occupied", "conversation", "switched off on people"], loc="lower right",
-              fontsize=8, ncol=4, frameon=False, bbox_to_anchor=(1, 1.0))
-    fig.suptitle("Synthetic 4-hour day: grey bands = lights down, camera can't see", fontsize=10, x=0.01,
-                 ha="left")
+    ax.legend(
+        handles,
+        ["vacant", "occupied", "conversation", "switched off on people"],
+        loc="lower right",
+        fontsize=8,
+        ncol=4,
+        frameon=False,
+        bbox_to_anchor=(1, 1.0),
+    )
+    fig.suptitle(
+        "Synthetic 4-hour day. Grey bands: blinds down, camera can't see. "
+        "Voices in the corridor from minute 140 to 152.",
+        fontsize=10,
+        x=0.01,
+        ha="left",
+    )
     fig.tight_layout()
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -274,14 +365,24 @@ def _runs(values) -> list[tuple[tuple[int, int], object]]:
     return out
 
 
-def run_simulation(cfg: RoomConfig, out_dir: str | Path, seed: int = 7, extra_sinks: list[Sink] | None = None,
-                   plot: bool = True) -> dict:
+def run_simulation(
+    cfg: RoomConfig,
+    out_dir: str | Path,
+    seed: int = 7,
+    extra_sinks: list[Sink] | None = None,
+    plot: bool = True,
+    days: int = 1,
+) -> dict:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     log_path = out_dir / "decisions.jsonl"
     log_path.unlink(missing_ok=True)
     sinks: list[Sink] = [JsonlSink(log_path), *(extra_sinks or [])]
-    result = simulate(cfg, seed=seed, sinks=sinks)
+    if days > 1:
+        many = simulate_days(cfg, days=days, seed=seed, sinks=sinks)
+        result = {**many["first_day"], "metrics": many["metrics"]}
+    else:
+        result = simulate(cfg, seed=seed, sinks=sinks)
     if plot:
         try:
             result["plot"] = str(plot_timeline(result, out_dir / "timeline.png"))

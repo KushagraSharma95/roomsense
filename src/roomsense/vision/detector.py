@@ -115,9 +115,7 @@ class YoloxDetector:
 
         path = Path(model_path)
         if not path.exists():
-            raise FileNotFoundError(
-                f"model not found: {path}. Download it with: roomsense models download nano"
-            )
+            raise FileNotFoundError(f"model not found: {path}. Download it with: roomsense models download nano")
         opts = ort.SessionOptions()
         opts.intra_op_num_threads = threads
         opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL

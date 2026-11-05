@@ -63,6 +63,7 @@ class IouTracker:
         max_missed: int = 15,
         report_missed: int | None = None,
         max_centre_distance: float = 0.6,
+        tentative_max_missed: int = 2,
     ) -> None:
         self.iou_threshold = iou_threshold
         self.min_hits = min_hits
@@ -71,6 +72,9 @@ class IouTracker:
         # out of view stop being counted quickly
         self.report_missed = max(1, max_missed // 3) if report_missed is None else report_missed
         self.max_centre_distance = max_centre_distance
+        # A new track survives a couple of missed frames while it collects its first hits, so one missed
+        # detection doesn't restart confirmation. A one-frame false alarm still never reaches min_hits.
+        self.tentative_max_missed = tentative_max_missed
         self.tracks: list[Track] = []
         self._next_id = 1
 
@@ -117,8 +121,8 @@ class IouTracker:
                 t.missed += 1
                 t.box = predicted[i]
                 t.velocity *= 0.5  # coast, but slow down so a lost track doesn't drift across the room
-            if t.missed <= self.max_missed and (t.confirmed or t.missed == 0):
-                survivors.append(t)  # unconfirmed tracks die on their first miss: one-frame false alarms
+            if t.missed <= (self.max_missed if t.confirmed else self.tentative_max_missed):
+                survivors.append(t)
         self.tracks = survivors
 
         for j, d in enumerate(detections):

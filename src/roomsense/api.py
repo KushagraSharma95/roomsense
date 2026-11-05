@@ -27,7 +27,7 @@ def create_app(state: SharedState):
     @app.get("/decisions")
     def decisions(limit: int = 50) -> list[dict]:
         _, _, ds = state.snapshot()
-        return ds[-max(1, min(limit, 200)):]
+        return ds[-max(1, min(limit, 200)) :]
 
     @app.get("/preview.jpg")
     def preview() -> Response:

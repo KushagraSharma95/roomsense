@@ -22,10 +22,14 @@ class MqttSink:
 
             client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=f"roomsense-{room_id}")
             client.will_set(f"{self.prefix}/online", "false", qos=1, retain=True)
+            client.on_connect = self._on_connect
             client.connect(cfg.host, cfg.port, keepalive=30)
-            client.loop_start()
-            client.publish(f"{self.prefix}/online", "true", qos=1, retain=True)
+            client.loop_start()  # paho reconnects by itself; _on_connect runs after every (re)connect
         self.client = client
+
+    def _on_connect(self, client, userdata, flags, reason_code, properties=None) -> None:  # noqa: ARG002
+        # After a dropped connection the broker has published our last will ("false"), so say so again.
+        client.publish(f"{self.prefix}/online", "true", qos=1, retain=True)
 
     def publish_status(self, status: dict) -> None:
         self.client.publish(f"{self.prefix}/status", json.dumps(status), qos=0, retain=True)

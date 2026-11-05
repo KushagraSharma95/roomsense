@@ -22,8 +22,7 @@ def test_simulated_day_fused_system_never_switches_off_on_people():
 
 def test_simulate_cli_writes_log_and_metrics(tmp_path):
     out = tmp_path / "sim"
-    assert main(["simulate", "--config", str(EXAMPLE), "--out", str(out), "--no-plot", "--json",
-                 "--qrc-mock"]) == 0
+    assert main(["simulate", "--config", str(EXAMPLE), "--out", str(out), "--no-plot", "--json", "--qrc-mock"]) == 0
     lines = (out / "decisions.jsonl").read_text().splitlines()
     first = json.loads(lines[0])
     assert {"t", "target", "value", "state", "reason", "evidence"} <= set(first)

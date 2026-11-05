@@ -30,6 +30,7 @@ class StepResult:
     vision_note: str
     change: StateChange | None = None
     decisions: list[Decision] = field(default_factory=list)
+    detections: list[Detection] = field(default_factory=list)  # raw detector output for this frame
 
 
 class RoomPipeline:
@@ -54,6 +55,9 @@ class RoomPipeline:
         self._last_status = float("-inf")
         self._frame_idx = 0
         self._tracks: list[Track] = []
+        self._detections: list[Detection] = []
+        self._started: float | None = None
+        self._synced = False  # devices commanded at least once since start-up
 
     def process_frame(self, t: float, frame_bgr: np.ndarray) -> StepResult:
         """Run detection on this frame (or reuse the last tracks on skipped frames) and update the room."""
@@ -68,7 +72,8 @@ class RoomPipeline:
     def process_detections(
         self, t: float, detections: list[Detection], vision_ok: bool = True, vision_note: str = "ok"
     ) -> StepResult:
-        self._tracks = self.tracker.update(detections if vision_ok else [])
+        self._detections = list(detections) if vision_ok else []
+        self._tracks = self.tracker.update(self._detections)
         return self._update(t, self._tracks, vision_ok, vision_note)
 
     def _update(self, t: float, tracks: list[Track], vision_ok: bool, vision_note: str) -> StepResult:
@@ -80,22 +85,56 @@ class RoomPipeline:
         zone_counts = {name: len(ids) for name, ids in zones.items() if name != ZoneMap.ROOM}
         speech = self.speech.ratio(t) if self.speech is not None else None
 
+        if self._started is None:
+            self._started = t
         change = self.estimator.update(t, len(positions), zone_counts, speech, vision_ok)
         decisions = self.policy.on_state_change(change) if change else []
+        if change:
+            self._synced = True
+        elif not self._synced:
+            decisions += self._startup_sync(t, vision_ok)
         decisions += self.policy.tick(t)
         for d in decisions:
             for s in self.sinks:
                 s.publish_decision(d)
 
         ev = self.estimator.last_evidence
-        result = StepResult(t, tracks, positions, zones, self.estimator.state, ev.people if ev else 0,
-                            speech, vision_ok, vision_note, change, decisions)
+        result = StepResult(
+            t,
+            tracks,
+            positions,
+            zones,
+            self.estimator.state,
+            ev.people if ev else 0,
+            speech,
+            vision_ok,
+            vision_note,
+            change,
+            decisions,
+            list(self._detections),
+        )
         if t - self._last_status >= self.status_every_s:
             self._last_status = t
             status = self.status_dict(result)
             for s in self.sinks:
                 s.publish_status(status)
         return result
+
+    def _startup_sync(self, t: float, vision_ok: bool) -> list[Decision]:
+        """Devices may be in any state when roomsense starts (lights left on before a restart). Once the
+        room's state is settled, command every device to match it: an occupied room after a few seconds,
+        an empty one only after a full vacancy timeout, as if it had just emptied."""
+        fusion, state = self.cfg.fusion, self.estimator.state
+        if state == RoomState.VACANT:
+            wait = fusion.vacant_after_s if vision_ok else fusion.degraded_vacant_after_s
+            reason = f"start-up: nobody seen or heard in the first {wait:.0f} s"
+        else:
+            wait = fusion.occupied_after_s + fusion.count_window_s
+            reason = f"start-up: room {state.value}"
+        if t - self._started < wait:
+            return []
+        self._synced = True
+        return self.policy.sync(t, state, reason, self.estimator.last_evidence)
 
     def status_dict(self, r: StepResult) -> dict:
         return {
@@ -123,13 +162,20 @@ STATE_COLOURS = {  # BGR
 
 
 def draw_overlay(frame_bgr: np.ndarray, r: StepResult, pipeline: RoomPipeline, blur: bool = True) -> np.ndarray:
-    """Annotated copy of the frame. People are blurred by default so previews and recordings stay anonymous."""
+    """Annotated copy of the frame.
+
+    With `blur`, every person the detector found in this frame is blurred, along with every track the
+    tracker holds (including ones not yet confirmed). A person the detector misses in a frame is not,
+    so treat recordings as personal data even with blurring on.
+    """
     out = frame_bgr.copy()
     h, w = out.shape[:2]
     if blur:
-        for tr in r.tracks:
-            x1, y1, x2, y2 = (int(v) for v in tr.box)
-            x1, y1, x2, y2 = max(0, x1), max(0, y1), min(w, x2), min(h, y2)
+        boxes = [d.box for d in r.detections] + [tuple(t.box) for t in pipeline.tracker.tracks]
+        for x1, y1, x2, y2 in boxes:
+            mx, my = 0.08 * (x2 - x1), 0.08 * (y2 - y1)  # a margin so edges of people aren't left sharp
+            x1, y1 = max(0, int(x1 - mx)), max(0, int(y1 - my))
+            x2, y2 = min(w, int(x2 + mx)), min(h, int(y2 + my))
             if x2 - x1 > 4 and y2 - y1 > 4:
                 roi = out[y1:y2, x1:x2]
                 k = max(3, (min(roi.shape[:2]) // 3) | 1)
@@ -142,8 +188,9 @@ def draw_overlay(frame_bgr: np.ndarray, r: StepResult, pipeline: RoomPipeline, b
         if z.name != ZoneMap.ROOM:
             n = len(r.zones.get(z.name, []))
             x, y = pts.mean(axis=0).astype(int)
-            cv2.putText(out, f"{z.name}: {n}", (int(x) - 30, int(y)), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                        colour, 1, cv2.LINE_AA)
+            cv2.putText(
+                out, f"{z.name}: {n}", (int(x) - 30, int(y)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, colour, 1, cv2.LINE_AA
+            )
 
     colour = STATE_COLOURS[r.state]
     for tr in r.tracks:
@@ -151,16 +198,22 @@ def draw_overlay(frame_bgr: np.ndarray, r: StepResult, pipeline: RoomPipeline, b
         inside = tr.track_id in r.positions
         c = colour if inside else (150, 150, 150)
         cv2.rectangle(out, (x1, y1), (x2, y2), c, 2)
-        cv2.putText(out, f"#{tr.track_id}", (x1, max(12, y1 - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, c, 1,
-                    cv2.LINE_AA)
+        cv2.putText(out, f"#{tr.track_id}", (x1, max(12, y1 - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, c, 1, cv2.LINE_AA)
         fx, fy = (int(v) for v in tr.foot)
         cv2.circle(out, (fx, fy), 3, c, -1)
 
     speech = "n/a" if r.speech_ratio is None else f"{r.speech_ratio:.0%}"
-    lines = [f"{r.state.value.upper()}", f"people: {r.people}", f"speech: {speech}",
-             f"camera: {r.vision_note}"]
+    lines = [f"{r.state.value.upper()}", f"people: {r.people}", f"speech: {speech}", f"camera: {r.vision_note}"]
     cv2.rectangle(out, (8, 8), (260, 18 + 20 * len(lines)), (0, 0, 0), -1)
     for i, line in enumerate(lines):
-        cv2.putText(out, line, (16, 28 + 20 * i), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
-                    colour if i == 0 else (255, 255, 255), 1, cv2.LINE_AA)
+        cv2.putText(
+            out,
+            line,
+            (16, 28 + 20 * i),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            colour if i == 0 else (255, 255, 255),
+            1,
+            cv2.LINE_AA,
+        )
     return out

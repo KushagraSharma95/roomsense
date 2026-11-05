@@ -2,9 +2,17 @@ from roomsense.config import FusionConfig
 from roomsense.control import ControlPolicy
 from roomsense.fusion import RoomState, RoomStateEstimator
 
-CFG = FusionConfig(occupied_after_s=2, vacant_after_s=60, degraded_vacant_after_s=180, conversation_min_people=2,
-                   conversation_speech_ratio=0.2, conversation_after_s=5, conversation_end_s=20,
-                   speech_presence_ratio=0.1, count_window_s=3)
+CFG = FusionConfig(
+    occupied_after_s=2,
+    vacant_after_s=60,
+    degraded_vacant_after_s=180,
+    conversation_min_people=2,
+    conversation_speech_ratio=0.2,
+    conversation_after_s=5,
+    conversation_end_s=20,
+    speech_presence_ratio=0.1,
+    count_window_s=3,
+)
 ACTIONS = {
     "vacant": {"lights": "off", "av": "standby"},
     "occupied": {"lights": "work"},
@@ -122,3 +130,42 @@ def test_speech_switches_on_a_room_the_camera_cannot_see():
     est = RoomStateEstimator(CFG)
     changes, _ = run(est, 10, people=0, speech=0.5, vision_ok=False)
     assert [c.new for c in changes] == [RoomState.OCCUPIED] and "speech" in changes[0].reason
+
+
+def test_camera_coming_back_gets_a_full_timeout_before_calling_the_room_empty():
+    est = RoomStateEstimator(CFG)  # vacant after 60 s with a clear view, 180 s without one
+    _, t = run(est, 20, people=2)
+    _, t = run(est, 100, people=0, vision_ok=False, start=t)  # lights off for 100 s, everyone quiet
+    assert est.state == RoomState.OCCUPIED
+    changes, t = run(est, 5, people=0, start=t)  # picture is back, tracker still re-acquiring people
+    assert changes == []
+    run(est, 10, people=2, start=t)
+    assert est.state == RoomState.OCCUPIED
+
+
+def test_voices_outside_cannot_hold_an_empty_room_on_forever():
+    cfg = FusionConfig(occupied_after_s=2, vacant_after_s=60, speech_only_max_s=20, count_window_s=3)
+    est = RoomStateEstimator(cfg)
+    _, t = run(est, 30, people=1)
+    left = t
+    changes, _ = run(est, 300, people=0, speech=0.4, start=t)  # everyone left; voices heard through the door
+    assert [c.new for c in changes] == [RoomState.VACANT]
+    assert changes[0].t <= left + 20 + 60 + 2  # speech counts for 20 s of clear view, then the normal timeout
+
+
+def test_held_change_for_a_device_the_new_state_ignores_is_dropped():
+    from roomsense.fusion import Evidence, StateChange
+
+    actions = {"conversation": {"av": "on"}, "vacant": {"av": "standby"}, "occupied": {"lights": "work"}}
+    policy = ControlPolicy("r1", actions, min_hold_s=30)
+
+    def change(t, old, new):
+        return StateChange(t, old, new, "test", Evidence(t, 0, 0))
+
+    assert [d.action.key for d in policy.on_state_change(change(0, RoomState.VACANT, RoomState.CONVERSATION))] == [
+        "av.on"
+    ]
+    assert policy.on_state_change(change(5, RoomState.CONVERSATION, RoomState.VACANT)) == []  # av.standby held
+    sent = policy.on_state_change(change(10, RoomState.VACANT, RoomState.OCCUPIED))
+    assert [d.action.key for d in sent] == ["lights.work"]
+    assert policy.tick(60) == [] and policy.current["av"] == "on"  # no stale standby while people are in
