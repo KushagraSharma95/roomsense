@@ -1,0 +1,52 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "roomsense"
+version = "0.1.0"
+description = "Room occupancy sensing and automation at the edge: camera and microphone fused, frames never leave the device"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Kushagra Sharma" }]
+keywords = ["occupancy", "computer-vision", "onnx", "smart-building", "edge", "mqtt", "q-sys"]
+dependencies = [
+  "numpy>=1.24",
+  "opencv-python-headless>=4.8",
+  "onnxruntime>=1.16",
+  "scipy>=1.10",
+  "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+api = ["fastapi>=0.110", "uvicorn>=0.27"]
+mqtt = ["paho-mqtt>=2.0"]
+audio = ["sounddevice>=0.4"]
+plot = ["matplotlib>=3.7"]
+dev = [
+  "pytest>=8",
+  "ruff>=0.5",
+  "httpx>=0.27",
+  "matplotlib>=3.7",
+  "fastapi>=0.110",
+  "uvicorn>=0.27",
+  "paho-mqtt>=2.0",
+]
+
+[project.scripts]
+roomsense = "roomsense.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/roomsense"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]

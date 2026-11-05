@@ -1,0 +1,42 @@
+# Config for OpenCV's public sample clip (samples/vtest.avi, 768x576, people walking outdoors).
+# There is no floor calibration here, so zones are in image pixels. Timeouts are short so you can
+# watch state changes happen inside an 80-second clip.
+
+room_id: sample-video
+
+zones:
+  - name: room
+    polygon: [[0, 0], [768, 0], [768, 576], [0, 576]]
+  - name: walkway
+    polygon: [[0, 180], [768, 120], [768, 330], [0, 330]]
+  - name: lawn
+    polygon: [[0, 330], [768, 330], [768, 576], [0, 576]]
+
+detector:
+  kind: yolox
+  model_path: models/yolox_nano.onnx
+  score_threshold: 0.35
+  threads: 2
+
+tracker:
+  iou_threshold: 0.25
+  min_hits: 3
+  max_missed: 15
+
+audio:
+  enabled: false
+
+fusion:
+  occupied_after_s: 1
+  vacant_after_s: 10
+  degraded_vacant_after_s: 30
+
+policy:
+  min_hold_s: 5
+  actions:
+    vacant:   {lights: "off"}
+    occupied: {lights: work}
+
+outputs:
+  console: true
+  jsonl_path: out/sample-video/decisions.jsonl

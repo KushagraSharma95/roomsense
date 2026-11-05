@@ -1,0 +1,83 @@
+# Example config for a small meeting room (4 m x 6 m) watched by one wall camera.
+# Copy it, then change the calibration points and zones for your own room.
+
+room_id: huddle-room-1
+
+camera:
+  # Four (or more) points you can see in the image, in pixels, and where those same
+  # points sit on the floor, in metres. Floor tape or the corners of a rug work well.
+  # Remove this block to work in image pixels instead of metres.
+  image_points: [[95, 560], [700, 560], [560, 230], [215, 230]]
+  floor_points: [[0.0, 0.0], [4.0, 0.0], [4.0, 6.0], [0.0, 6.0]]
+
+zones:
+  # "room" is special: only people standing inside it are counted as being in the room.
+  - name: room
+    polygon: [[0.0, 0.0], [4.0, 0.0], [4.0, 6.0], [0.0, 6.0]]
+  - name: table
+    polygon: [[1.0, 2.0], [3.0, 2.0], [3.0, 4.5], [1.0, 4.5]]
+  - name: entrance
+    polygon: [[0.0, 0.0], [1.2, 0.0], [1.2, 1.0], [0.0, 1.0]]
+
+detector:
+  kind: yolox                  # yolox (ONNX person detector) or motion (no model, background subtraction)
+  model_path: models/yolox_nano.onnx
+  score_threshold: 0.35
+  nms_threshold: 0.45
+  threads: 2
+  frame_stride: 1              # run detection on every Nth frame to save CPU
+
+tracker:
+  iou_threshold: 0.25
+  min_hits: 3                  # frames before a new track counts as a person
+  max_missed: 15               # frames a track survives without a detection (short occlusions)
+
+audio:
+  enabled: true
+  sample_rate: 16000
+  window_s: 10                 # speech ratio is measured over this many seconds
+
+fusion:
+  occupied_after_s: 2          # presence must last this long before the room counts as occupied
+  vacant_after_s: 300          # no person seen and no speech for this long: vacant
+  degraded_vacant_after_s: 900 # same, used when the camera is blocked or too dark to trust
+  conversation_min_people: 2
+  conversation_speech_ratio: 0.2
+  conversation_after_s: 10
+  conversation_end_s: 60
+  speech_presence_ratio: 0.1   # this much speech alone keeps the room occupied
+  count_window_s: 3            # people count is the median over this window
+
+policy:
+  min_hold_s: 30               # never switch the same device twice within this time
+  actions:
+    vacant:       {lights: "off", av: standby, hvac: setback}
+    occupied:     {lights: work, hvac: occupied}
+    conversation: {lights: meeting, av: "on", hvac: occupied}
+
+outputs:
+  console: true
+  jsonl_path: out/decisions.jsonl
+  mqtt:
+    enabled: false
+    host: localhost
+    port: 1883
+    topic_prefix: roomsense
+  qrc:
+    enabled: false
+    host: 127.0.0.1
+    port: 1710
+    user: ""
+    password: ""
+    # How each action maps onto controls in a Q-SYS design. The names below are examples:
+    # use the Named Controls or component names from your own design.
+    controls:
+      lights.off:     {control: LightingScene, value: 0}
+      lights.work:    {control: LightingScene, value: 1}
+      lights.meeting: {control: LightingScene, value: 2}
+      av.standby:     {component: Display, control: power, value: 0}
+      av.on:          {component: Display, control: power, value: 1}
+  api:
+    enabled: false
+    host: 127.0.0.1
+    port: 8080

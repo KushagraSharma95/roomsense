@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+
+# model weights and media are downloaded or recorded locally, never committed
+models/*.onnx
+samples/
+out/
+*.mp4
+*.avi
+*.wav

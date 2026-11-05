@@ -1,0 +1,43 @@
+# Quick test with a laptop webcam and microphone. No floor calibration: zones are in image pixels and
+# "room" covers any frame up to 1920x1080. Timeouts are short so you see state changes within a minute.
+# For a real room, start from room.example.yaml and calibrate.
+
+room_id: my-desk
+
+zones:
+  - name: room
+    polygon: [[0, 0], [1920, 0], [1920, 1080], [0, 1080]]
+
+detector:
+  kind: yolox
+  model_path: models/yolox_nano.onnx
+  score_threshold: 0.35
+  threads: 2
+
+audio:
+  enabled: true
+  window_s: 10
+
+fusion:
+  occupied_after_s: 2
+  vacant_after_s: 30
+  degraded_vacant_after_s: 60
+  conversation_min_people: 2
+  conversation_speech_ratio: 0.2
+  conversation_after_s: 5
+  conversation_end_s: 20
+
+policy:
+  min_hold_s: 5
+  actions:
+    vacant:       {lights: "off", av: standby}
+    occupied:     {lights: work}
+    conversation: {lights: meeting, av: "on"}
+
+outputs:
+  console: true
+  jsonl_path: out/webcam/decisions.jsonl
+  api:
+    enabled: false
+    host: 127.0.0.1
+    port: 8080
